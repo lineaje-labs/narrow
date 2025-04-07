@@ -61,7 +61,6 @@ class PatchExtractor:
                 else:
                     current_function_context = None
             
-
         tentative_def = None
         for line_data in pre_lines:
             line = str(line_data['line'])
@@ -119,39 +118,90 @@ class PatchExtractor:
             # Timed out. Just assume no targets could be found
             return []
 
-
-    def find_targets_in_ndv_entry(self, cve_id: str):
-        #resp = requests.get(
-        #    'https://www.cve.org/api/?action=getCveById&cveId=' + cve_id)
-
-        resp = requests.get('https://services.nvd.nist.gov/rest/json/cve/1.0/' + cve_id + '?addOns=dictionaryCpes')
-
-        json_data = resp.json()['result']['CVE_Items'][0]['cve']
-
-        references = json_data['references']
-
-        ref_data = references['reference_data']
-
-        for ref in ref_data:
-            if ref['url'].startswith('https://github.com'):
-                if '/pull/' in ref['url'] or '/commit/' in ref['url']:
-                    return self.find_targets_in_github_pull_request_or_commit(ref['url'])              
-
-        return []
+    def find_targets_in_nvd_entry(self, cve_id: str):
+        try:
+            # Using the NVD API 2.0 endpoint
+            api_url = f'https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}'
+            
+            # Add a proper User-Agent header to avoid potential blocks
+            headers = {
+                'User-Agent': 'VulnerabilityAnalysisTool/1.0'
+            }
+            
+            resp = requests.get(api_url, headers=headers)
+            resp.raise_for_status()  # Raise exception for HTTP errors
+            
+            json_data = resp.json()
+            
+            # Check if the expected structure exists in the 2.0 API response
+            if 'vulnerabilities' not in json_data or not json_data['vulnerabilities']:
+                print(f"Warning: No vulnerability data found for {cve_id}")
+                return []
+                
+            # Extract references from the new API structure
+            vuln_data = json_data['vulnerabilities'][0]['cve']
+            
+            if 'references' not in vuln_data:
+                return []
+                
+            ref_data = vuln_data['references']
+            
+            for ref in ref_data:
+                if 'url' in ref and ref['url'].startswith('https://github.com'):
+                    if '/pull/' in ref['url'] or '/commit/' in ref['url']:
+                        return self.find_targets_in_github_pull_request_or_commit(ref['url'])
+            
+            return []
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching NVD data for {cve_id}: {e}")
+            return []
+        except ValueError as e:
+            print(f"Error parsing NVD JSON for {cve_id}: {e}")
+            return []
+        except KeyError as e:
+            print(f"Missing key in NVD response for {cve_id}: {e}")
+            return []
 
     def find_targets_in_osv_entry(self, osv_id: str):
         if osv_id.startswith('CVE-'):
-            return self.find_targets_in_ndv_entry(osv_id)
-
-        resp = requests.get('https://api.osv.dev/v1/vulns/' + osv_id)
-
-        json_data = resp.json()
-        if 'aliases' in json_data:
-            for alias in json_data['aliases']:
-                if alias.startswith('CVE-'):
-                    return self.find_targets_in_ndv_entry(alias)
-
-        return []
+            return self.find_targets_in_nvd_entry(osv_id)
+        
+        try:
+            # OSV API endpoint
+            api_url = f'https://api.osv.dev/v1/vulns/{osv_id}'
+            
+            headers = {
+                'User-Agent': 'VulnerabilityAnalysisTool/1.0'
+            }
+            
+            resp = requests.get(api_url, headers=headers)
+            resp.raise_for_status()
+            
+            json_data = resp.json()
+            
+            # Look for CVE aliases first
+            if 'aliases' in json_data:
+                for alias in json_data['aliases']:
+                    if alias.startswith('CVE-'):
+                        return self.find_targets_in_nvd_entry(alias)
+            
+            # Look for GitHub references directly in OSV data
+            if 'references' in json_data:
+                for ref in json_data['references']:
+                    if 'url' in ref and ref['url'].startswith('https://github.com'):
+                        if '/pull/' in ref['url'] or '/commit/' in ref['url']:
+                            return self.find_targets_in_github_pull_request_or_commit(ref['url'])
+            
+            return []
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching OSV data for {osv_id}: {e}")
+            return []
+        except ValueError as e:
+            print(f"Error parsing OSV JSON for {osv_id}: {e}")
+            return []
+        except KeyError as e:
+            print(f"Missing key in OSV response for {osv_id}: {e}")
+            return []
 
     def _get_function_name_from_diff_line(self, line):
         tentative_def = None
@@ -165,4 +215,3 @@ class PatchExtractor:
             tentative_def = function_def_name.strip(" ")
 
         return tentative_def
-
